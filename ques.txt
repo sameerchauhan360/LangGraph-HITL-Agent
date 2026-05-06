@@ -1,0 +1,1 @@
+Find the last 10 years of annual revenue for NVIDIA and AMD, adjust all values for inflation to 2026 dollars, calculate CAGR for both nominal and inflation-adjusted revenue, then generate a chart comparing their growth trajectories and explain which company grew faster after adjusting for inflation.
