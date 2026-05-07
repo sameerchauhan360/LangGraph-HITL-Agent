@@ -1,497 +1,64 @@
-🧠 Notes: Branching, HITL, and Tree-Based Agent Execution (Your Approach)
+# 🚀 Proposed Pending Features
+
+These feature suggestions are carefully curated for your stateful terminal-based AI assistant. They are highly feasible to implement within your current Python/LangGraph architecture, make strong conceptual sense, and will drastically improve the developer experience.
 
 ---
 
-1. 🎯 Core Idea
-
-You are designing a stateful, branching execution system on top of LangGraph where:
-
-- Each approach = a branch (node)
-- Each branch = its own thread_id + checkpoint
-- Execution can be:
-  - paused
-  - resumed
-  - switched
-  - discarded (archived)
-
-This turns a linear agent into a tree of alternative solutions.
+### 1. 🔌 Model Context Protocol (MCP) Client
+Enable the agent to connect to any MCP Server (local or remote) to fetch dynamic tools on the fly.
+- **Why it's useful**: Instead of writing custom tools for every database, API, or service (such as GitHub, Slack, Brave Search, or SQLite), the agent can plug directly into the fast-growing open-source MCP ecosystem.
+- **How it would work**:
+  - A `/mcp connect <url_or_command>` CLI command.
+  - The client queries the MCP server's schemas, compiles them into LangChain-compatible `StructuredTool` objects, and dynamically binds them to the LLM node on startup.
+- **Feasibility**: **High** (the `mcp` Python SDK is lightweight and easy to integrate).
 
 ---
 
-2. 🌳 Task Tree Model
-
-Instead of a single state:
-
-{ "messages": [...] }
-
-You maintain:
-
-state = {
-    "active_node_id": "...",
-    "task_tree": {
-        node_id: {
-            "goal": "...",
-            "parent": "...",
-            "children": [...],
-            "thread_id": "...",
-            "status": "...",  # active | paused | failed | completed | archived
-            "summary": "...",
-        }
-    }
-}
+### 2. 🪓 Containerized Sandboxed Execution
+Run python execution scripts in a lightweight, isolated Docker container or restricted sandbox instead of directly on your host machine.
+- **Why it's useful**: Running code on your native OS is risky and forces you to micro-manage every prompt via HITL. Sandboxing provides absolute safety. It allows the agent to run testing, compiling, and data-processing tasks fully autonomously without nagging you for minor operations.
+- **How it would work**:
+  - When the agent triggers `code_executor`, the system runs a temporary Docker container, mounts a temp copy of the workspace, executes the script, and returns the stdout.
+  - Dangerous commands are contained inside the disposable sandbox.
+- **Feasibility**: **High** (using the standard `docker` Python client library).
 
 ---
 
-3. 🔑 Key Concepts
-
-🔹 Branch = Execution Timeline
-
-- Each node has its own "thread_id"
-- Independent memory + checkpoint
-
----
-
-🔹 Switching = Resume Different Thread
-
-graph.invoke(None, thread_id=target_thread)
-
-- No LLM rethinking
-- No message replay
+### 3. 🧠 Cross-Timeline Semantic Memory (Vector DB)
+A shared, long-term knowledge base that persists across different branching timelines.
+- **Why it's useful**: Right now, if the agent solves a complex bug in `branch_A`, that knowledge is completely lost if you switch to `branch_B`. A shared vector database allows the agent to save key facts (e.g., *"Learned that library X has a bug where Y must be initialized first"*) and search them semantically across all branches.
+- **How it would work**:
+  - Incorporate a local vector store like `chromadb` or `lancedb` (running side-by-side with your SQLite DB).
+  - Provide a `remember` tool that embeds notes, and a background mechanism that retrieves contextually similar notes based on the current prompt.
+- **Feasibility**: **High** (no external server required, runs entirely locally in memory/disk).
 
 ---
 
-🔹 Branching = Create New Thread
-
-- Copy or summarize parent context
-- Start new execution path
-
----
-
-4. ⛔ Interrupt + HITL
-
-Using LangGraph "interrupt":
-
-- Execution pauses inside a tool
-- Resume continues from same line
-- No need to re-call LLM
+### 4. 🧪 Self-Correction & Verification Node (Critique Loop)
+An automated syntax and import check node that intercepts code *before* it is shown to the user.
+- **Why it's useful**: Saves you from rejecting code due to trivial python syntax errors or missing library imports.
+- **How it would work**:
+  - Introduce a `validator` node in the LangGraph flow between `agent` and `human_approval`.
+  - The validator runs the proposed script through an AST check (`ast.parse`) or a quick linter check. If it fails, the graph redirects back to the agent with a traceback, correcting the code autonomously before you ever see it.
+- **Feasibility**: **Extremely High** (purely python-logic-based).
 
 ---
 
-5. 🧠 Role Separation
-
-LLM:
-
-- generates code
-- suggests actions (optional)
-- helps summarize
-
-System (Controller):
-
-- manages tree
-- switches branches
-- enforces rules
-
-User:
-
-- decides:
-  - which branch to continue
-  - which to discard
+### 5. 🛠️ Dynamic Tool Learning (Self-Improving Agent)
+Allow the agent to dynamically build, test, and register its own permanent custom tools.
+- **Why it's useful**: If the agent notices you are asking it to repeat a task (e.g., converting CSV to JSON, resizing images, fetching logs), it can write a specialized Python tool, place it in a local directory, and register it so it is available forever.
+- **How it would work**:
+  - The agent writes a standard Python file with a `@tool` decorator into a `src/chatbot/tools/learned/` folder.
+  - On startup (or via a `/reload` command), `main.py` uses `importlib` to scan this directory and auto-load any new tools.
+- **Feasibility**: **Medium-High** (requires dynamic module loading).
 
 ---
 
-6. 🔁 Branch Lifecycle
-
-Each branch can be:
-
-- "active"
-- "paused"
-- "failed"
-- "completed"
-- "archived"
-
----
-
-7. 🌿 Branching Strategy
-
-When user says:
-
-- “try another way” → create new branch
-- “go back” → switch branch
-
-New branch includes:
-
-- goal
-- parent reference
-- context summary
-
----
-
-8. 🧠 Context Handling Between Branches
-
-Threads do NOT share memory automatically.
-
-So when creating a branch:
-
-- pass summary of parent
-- not full message history (better scalability)
-
----
-
-9. 🌳 Tree Structure (Supports Nested Branching)
-
-Branches can branch further:
-
-A
-├── B
-│   └── D
-└── C
-
-Each node:
-
-- independent execution
-- linked via parent/children
-
----
-
-10. 🎛️ UI-Based Control (Major Design Choice)
-
-Instead of LLM deciding:
-
-👉 You introduce a UI where user can:
-
-- view full tree
-- switch branches
-- prune branches
-- inspect summaries
-
-This makes system:
-
-- predictable
-- debuggable
-- user-controlled
-
----
-
-11. ✂️ Branch Limit + Pruning
-
-Constraint:
-
-- max children per node
-
-When limit reached:
-
-- user must select a branch to prune
-
----
-
-🔥 Pruning Strategy (Your Design)
-
-- User decides what to remove
-- LLM suggestion = optional
-- Never auto-delete silently
-
----
-
-✅ Preferred action:
-
-- Archive instead of delete
-
-status = "archived"
-
----
-
-12. 🧠 LLM Suggestion (Optional)
-
-LLM can:
-
-- suggest which branch is less useful
-- suggest which branch to switch to
-
-But:
-
-«❗ Never enforce decisions»
-
----
-
-13. 🎯 Visualization
-
-You can visualize tree via:
-
-- CLI tree view (quick)
-- Graphviz / network graph
-- Full UI (best)
-
-Each node shows:
-
-- goal
-- status
-- summary
-
----
-
-14. ⚠️ Key Constraints & Rules
-
-- Never rely on messages for control flow
-- Never let LLM directly control thread_id
-- Never re-run LLM to recreate past decisions
-- Always resume from checkpoint
-
----
-
-15. 🧠 Mental Models
-
-🔹 Git Analogy
-
-- branch = approach
-- checkout = switch
-- commit = summary
-- delete = prune
-
----
-
-🔹 Execution Model
-
-- each branch = paused function stack
-- switching = resume different stack
-
----
-
-16. 🚀 Final Architecture
-
-User (UI)
-   ↓
-Controller (state + tree manager)
-   ↓
-LangGraph (execution engine via thread_id)
-   ↓
-LLM (reasoning + generation only)
-
----
-
-17. 🧠 Final Insight
-
-You are building:
-
-«A human-controlled, branching AI execution system»
-
-Not just a chatbot.
-
----
-
-🔒 One-Line Summary
-
-«Structured state + branching + human control = reliable and powerful agent system�
-
-
-
-🧠 Notes: Snapshot-Based Workspace (No Branching)
-
----
-
-1. 🎯 Core Idea
-
-Instead of maintaining multiple active branches, you use:
-
-- One active working directory
-- Multiple saved snapshots (backups)
-
-This keeps the system:
-
-- simple
-- predictable
-- easy to manage
-
----
-
-2. 📁 Folder Structure
-
-/project/
-    src/
-    data/
-    outputs/
-
-.snapshot/
-    /{thread_id}/
-        project/
-            src/
-            data/
-            outputs/
-        meta.json
-
----
-
-3. 🔑 Key Concepts
-
-🔹 Active Workspace
-
-/project/
-
-- This is the only place where execution happens
-- LLM and tools always operate here
-
----
-
-🔹 Snapshot
-
-.snapshot/{thread_id}/
-
-- A frozen copy of "/project"
-- Represents a previous state or attempt
-- Should be treated as read-only
-
----
-
-4. 🔁 Core Operations
-
----
-
-🆕 Create Snapshot
-
-Save current state:
-
-cp -r /project .snapshot/{thread_id}/project
-
-Optional metadata:
-
-{
-  "goal": "Fix scraping bug",
-  "status": "failed",
-  "created_at": "..."
-}
-
----
-
-🔄 Switch to Snapshot
-
-Steps:
-
-1. Save current "/project" (optional but recommended)
-2. Replace active workspace
-
----
-
-⚠️ Safe (atomic-like) approach
-
-mv project project_old
-cp -r .snapshot/{thread_id}/project project
-rm -rf project_old
-
----
-
-5. 🧠 Workflow
-
-Work in /project
-   ↓
-Create snapshot (save state)
-   ↓
-Try changes
-   ↓
-If needed → restore snapshot
-
----
-
-6. ⚠️ Important Rules
-
-❗ 1. Never modify snapshots directly
-
-- Treat ".snapshot/" as immutable history
-
----
-
-❗ 2. Always operate in "/project"
-
-- All tools, LLM calls, execution happen here
-
----
-
-❗ 3. Snapshot before risky changes
-
-- Prevent loss of working state
-
----
-
-❗ 4. Avoid partial copy issues
-
-- Use safe switching (rename + replace)
-
----
-
-7. 📌 Metadata (Recommended)
-
-Each snapshot should include:
-
-{
-  "goal": "...",
-  "status": "active | failed | completed",
-  "notes": "...",
-  "created_at": "..."
-}
-
-Helps with:
-
-- identifying snapshots
-- choosing what to restore
-- debugging
-
----
-
-8. ✅ Advantages
-
-- Simple mental model
-- No branching complexity
-- Easy restore
-- Deterministic behavior
-
----
-
-9. ⚠️ Limitations
-
-❌ Full copy overhead
-
-- Slower for large projects
-
----
-
-❌ No parallel execution
-
-- Only one active workspace
-
----
-
-❌ Risk during switching
-
-- Interrupted copy → inconsistent state
-
-(→ mitigated by safe swap)
-
----
-
-10. 🧠 Mental Model
-
-Active Workspace = Live state
-Snapshots = Saved checkpoints
-
----
-
-11. 🚀 When to Use This
-
-Best for:
-
-- coding agents
-- iterative debugging
-- experimentation workflows
-- single-user systems
-
----
-
-12. 🔒 Final Takeaway
-
-«Keep one active workspace and use snapshots as checkpoints—simple, reliable, and easy to control.»
-
----
-
-🧾 One-Line Summary
-
-«Work in "/project", save states in ".snapshot/", and switch by safely replacing the active folder.»
-
----
+### 6. ⏳ Background Task Execution (Non-Blocking Tools)
+Allow tools that take a long time (e.g. scraping 50 pages, running heavy test suites, running server compiles) to run asynchronously in the background.
+- **Why it's useful**: You don't have to wait for the agent to finish execution to continue talking. You can chat, change branches, or read files while a background compilation or scrape is running.
+- **How it would work**:
+  - An async tool execution queue.
+  - The terminal main loop uses `asyncio.create_task` to let the tool run in the background, while keeping the user input prompt alive and active.
+  - When the background task finishes, it posts a live desktop/terminal notification.
+- **Feasibility**: **Medium-High** (requires adjustments to the asyncio prompt loop).
