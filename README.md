@@ -1,6 +1,6 @@
 # LangGraph HITL Agent
 
-A persistent, terminal-based AI assistant built on LangGraph with **branching timelines**, **file-system snapshots**, and **human-in-the-loop** control. The agent can plan, reason, execute code, search the web — and lets you explore multiple independent lines of thought simultaneously.
+A persistent, terminal-based AI assistant built on LangGraph with **git-backed branching timelines** and **human-in-the-loop** control. The agent can plan, reason, execute code, and search the web — while letting you explore multiple independent lines of work simultaneously, each with isolated files and conversation memory.
 
 ---
 
@@ -10,24 +10,25 @@ A persistent, terminal-based AI assistant built on LangGraph with **branching ti
 - **JSON Task Planner** — Automatically decomposes complex goals into a structured, trackable checklist shown live in the terminal.
 - **Stateful Execution** — Remembers context and plan status across sessions using a SQLite checkpointer (via LangGraph's `AsyncSqliteSaver`).
 - **Live Streaming** — Responses stream token-by-token to the terminal.
-- **Human-in-the-Loop (HITL)** — Pauses before executing any code or search, shows you exactly what it's about to do, and asks for approval (`y/n`).
+- **Human-in-the-Loop (HITL)** — Pauses before executing any code, shows you exactly what it's about to run, and asks for approval (`y/n`).
 
 ### 🌿 Branching Timelines
 - Create independent **parallel timelines** from any point in a conversation.
-- Each timeline has its own isolated **conversation memory** (via separate LangGraph thread IDs).
-- New timelines **inherit** the full conversation context of the parent at the moment of branching.
-- Timelines are purely independent after creation — no cascading rules.
-- A **fork tree** is maintained for visualization (so you can see what knowledge each timeline inherited), but it imposes no behavioral constraints.
+- Each timeline has its own isolated **conversation memory** (via separate LangGraph thread IDs) and its own **file workspace** (via native Git branches).
+- New timelines **inherit** the full conversation context and all files of the parent at the moment of branching.
+- Timelines are fully independent after creation — no cascading rules between them.
+- A **fork tree** is maintained purely for visualization (showing what knowledge each timeline inherited).
 
-### 📸 File-System Snapshots
-- When you switch timelines, the agent **moves** your workspace files in and out — each timeline has its own isolated file state.
-- Uses `.agentignore` (same syntax as `.gitignore`) to define which files and folders are tracked.
-- On exit (`quit` or `Ctrl+C`), files are automatically saved to the current timeline's snapshot.
-- On startup, the previous snapshot is automatically restored.
+### 📂 Git-Backed File Isolation
+- Each agent timeline maps 1-to-1 with a local Git branch (`agent/<name>`).
+- Switching timelines = `git checkout` — atomic, instant, and OS-safe.
+- On exit (`quit` or `Ctrl+C`), all workspace files are automatically committed as a checkpoint.
+- On startup, the workspace is restored to the last checkpoint for that timeline.
+- Respects `.gitignore` natively — no separate ignore file needed.
 
 ### 🧠 Auto-Summarization
 - When conversation history exceeds **20 messages**, older messages are automatically summarized by the LLM into a single context block.
-- The summary is persisted back into the LangGraph state — so summarization only happens once per threshold crossing, not on every turn.
+- The summary is persisted back into LangGraph state — summarization only happens once per threshold crossing.
 - Always keeps the last **10 messages** verbatim for precise recent context.
 
 ### 🛠️ Tools
@@ -38,13 +39,22 @@ A persistent, terminal-based AI assistant built on LangGraph with **branching ti
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Prerequisites
+
+Make sure you have **Git** installed and initialized in your project:
+```bash
+git init
+git add .
+git commit -m "chore: initial commit"
+```
+
+### 2. Install dependencies
 
 ```bash
 uv sync
 ```
 
-### 2. Configure environment
+### 3. Configure environment
 
 Create a `.env` file in the project root:
 
@@ -53,48 +63,69 @@ OPENAI_API_KEY=your_openai_api_key
 TAVILY_API_KEY=your_tavily_api_key
 ```
 
-> **Note:** The agent is configured to use an OpenAI-compatible endpoint. To use a different provider, update the `base_url` in `src/chatbot/nodes/llm.py`.
+> **Note:** The agent uses an OpenAI-compatible endpoint. To use a different provider, update `base_url` in `src/chatbot/nodes/llm.py`.
 
-### 3. Run the agent
+### 4. Run the agent
 
 ```bash
-python src/main.py
-# or
 uv run src/main.py
 ```
+
+On **first run**, the agent automatically creates the `agent/default` git branch and sets up the initial workspace.
 
 ---
 
 ## Commands
 
-Once inside the agent, you can use these system commands in addition to chatting:
+Once inside the agent, use these commands in addition to chatting:
 
 | Command | Description |
 |---|---|
-| `history` | Show full conversation history for the current timeline |
-| `quit` / `exit` | Save snapshot and exit |
+| `history` | Show conversation history for the current timeline |
+| `quit` / `exit` | Commit a checkpoint and exit |
 | `/branches` | List all timelines with their status and fork tree |
 | `/branch <name> <desc>` | Create a new timeline forked from the current one |
-| `/checkout <name>` | Switch to a different timeline (saves current, restores target) |
+| `/checkout <name>` | Switch to a different timeline (commits current, restores target) |
 | `/archive <name>` | Mark a timeline as archived (hidden but not deleted) |
 | `/restore <name>` | Restore an archived timeline back to active |
-| `/prune <name>` | Permanently delete a timeline and its snapshot |
+| `/prune <name>` | Permanently delete a timeline and its git branch |
+| `/status` | Show uncommitted file changes on the current timeline |
+| `/log` | Show checkpoint history (git commits) for the current timeline |
+| `/discard` | Revert all changes since the last checkpoint (also notifies agent memory) |
+| `/merge <name>` | Merge file changes from another timeline into the current one |
 
 ---
 
-## File-System Snapshot: `.agentignore`
+## How Branching Works
 
-The `.agentignore` file in the project root defines which files are **not** tracked by the snapshot system. It uses the same wildmatch syntax as `.gitignore`.
+```
+main              ← stable/production branch — never worked on directly
+└── agent/default ← primary working timeline (created automatically on first run)
+        ├── agent/fastapi    ← /branch fastapi "build REST API"
+        ├── agent/research   ← /branch research "research approach X"
+        └── agent/mcp        ← /branch mcp "explore MCP protocol"
+                └── agent/mcp-deep   ← /branch mcp-deep "go deeper"
+```
 
-By default, the following are excluded:
-- Agent infrastructure: `src/`, `data/snapshots/`, `data/branches.json`
-- Python environment: `.venv/`, `__pycache__/`, `*.pyc`
-- Version control: `.git/`
-- Sensitive files: `.env`
-- Build artifacts: `*.lock`, `*.toml`
-- Database files: `*.db`, `*.db-shm`, `*.db-wal`
+- **All agent work happens on `agent/` branches** — `main` is only updated when you explicitly merge.
+- Each branch has its own files **and** its own conversation memory.
+- New branches inherit both the files and conversation of the parent at the moment of creation.
+- After branching, all timelines are **completely independent**.
 
-Any files the agent **creates** (scripts, outputs, downloaded data, etc.) that don't match these patterns are fully tracked and isolated per timeline.
+### Merging finished work
+
+**Between agent timelines** (using `/merge` inside the agent):
+```
+/checkout default
+/merge fastapi       ← brings fastapi's files into default
+```
+
+**Promoting to main** (in a terminal, outside the agent):
+```bash
+git checkout main
+git merge agent/default
+git push
+```
 
 ---
 
@@ -102,44 +133,22 @@ Any files the agent **creates** (scripts, outputs, downloaded data, etc.) that d
 
 ```
 src/
-├── main.py                  # Entry point: terminal UI, streaming, branching commands
-├── tree_manager.py          # Branch metadata (branches.json read/write)
-├── snapshot_manager.py      # File-system snapshot engine (.agentignore + move/restore)
+├── main.py              # Entry point: terminal UI, streaming, all commands
+├── tree_manager.py      # Branch metadata (branches.json read/write + git config)
+├── snapshot_manager.py  # Git-based workspace switching (checkout/commit/branch)
 └── chatbot/
-    ├── graph.py             # LangGraph workflow and routing logic
-    ├── state.py             # AgentState definition
+    ├── graph.py         # LangGraph workflow and routing logic
+    ├── state.py         # AgentState definition
     └── nodes/
-    │   ├── agent.py         # Main reasoning node with auto-summarization
-    │   ├── planner.py       # Task decomposition node
-    │   └── llm.py           # LLM client configuration
+    │   ├── agent.py     # Main reasoning node with auto-summarization
+    │   ├── planner.py   # Task decomposition node
+    │   └── llm.py       # LLM client configuration
     └── tools/
-        ├── executor_tool.py # HITL code execution tool
-        └── websearch.py     # Tavily web search tool
+        ├── executor_tool.py  # HITL code execution tool
+        └── websearch.py      # Tavily web search tool
 
 data/
-├── branches.json            # Timeline metadata (name, parent, status, created_at)
-└── snapshots/               # Per-timeline file snapshots
-    ├── default/
-    ├── mcp/
-    └── ...
-
-.agentignore                 # Defines files excluded from snapshot tracking
+└── branches.json        # Timeline metadata (parent lineage + status)
+                         # Branch descriptions stored in: git config branch.agent/<name>.description
+                         # Branch timestamps from: git log
 ```
-
----
-
-## How Branching Works
-
-```
-default  ──── /branch mcp "explore MCP protocol"
-                   │
-                   ├── mcp  ──── /branch deep-dive "go deeper on X"
-                   │                  └── deep-dive
-                   │
-                   └── back on default, working independently
-```
-
-- Each node in the fork tree represents a **snapshot of knowledge** at the moment of branching.
-- The tree is purely informational — it tells you what a timeline knew at birth.
-- After branching, all timelines are fully independent.
-- `/checkout` saves your current files and conversation, then restores the target timeline's files and conversation.
