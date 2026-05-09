@@ -1,132 +1,77 @@
 """
-Snapshot Manager
-================
-Handles file-system snapshotting for the branching system.
+Git-Based Snapshot Manager
+==========================
+Handles file-system snapshotting using the local Git repository.
 
-Strategy: MOVE-based (not copy-based)
-- Active branch's files live in the PROJECT ROOT (tracked paths)
-- Inactive branches' files live in data/snapshots/<branch_name>/
-- Switching branches = MOVE current files out → MOVE target files in
-- This is instant on the same drive (just a metadata rename)
-
-.agentignore: defines patterns for files that should NOT be tracked,
-using the same gitignore wildmatch syntax.
+Each agent timeline maps 1-to-1 with a local Git branch: `agent/<branch_name>`.
+- Switching branches = git checkout (atomic, instant, OS-level safe)
+- Saving state      = git add -A && git commit (auto-checkpoint)
+- Respects .gitignore natively — no separate .agentignore needed
 """
 
+import subprocess
 import os
-import shutil
-import pathspec
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-_SRC_DIR = os.path.dirname(__file__)                       # src/
-PROJECT_ROOT = os.path.dirname(_SRC_DIR)                   # project root
-SNAPSHOT_DIR = os.path.join(PROJECT_ROOT, "data", "snapshots")
-AGENTIGNORE = os.path.join(PROJECT_ROOT, ".agentignore")
+def _run_git(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
+    """Run a git command in the project root."""
+    return subprocess.run(
+        ["git"] + args,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=check,
+    )
 
 
-def _load_spec() -> pathspec.PathSpec:
-    """Load .agentignore patterns. Returns an empty spec if file doesn't exist."""
-    if not os.path.exists(AGENTIGNORE):
-        return pathspec.PathSpec.from_lines("gitwildmatch", [])
-    with open(AGENTIGNORE, "r", encoding="utf-8") as f:
-        lines = f.read().splitlines()
-    return pathspec.PathSpec.from_lines("gitwildmatch", lines)
+def _git_branch(branch_name: str) -> str:
+    """Returns the full git branch name for an agent timeline."""
+    return f"agent/{branch_name}"
 
 
-def _get_tracked_files(spec: pathspec.PathSpec) -> list[str]:
-    """
-    Walk the project root and return relative paths of all tracked files
-    (i.e., files not matched by .agentignore patterns).
-    """
-    tracked = []
-    for root, dirs, files in os.walk(PROJECT_ROOT):
-        # Compute relative path of current directory
-        rel_root = os.path.relpath(root, PROJECT_ROOT)
+def _has_changes() -> bool:
+    """Returns True if there are any uncommitted changes in the workspace."""
+    res = _run_git(["status", "--porcelain"], check=False)
+    return bool(res.stdout.strip())
 
-        # Prune ignored directories in-place to avoid walking into them
-        dirs[:] = [
-            d for d in dirs
-            if not spec.match_file(
-                (os.path.join(rel_root, d) + "/").replace("\\", "/")
-            )
-        ]
 
-        for file in files:
-            if rel_root == ".":
-                rel_path = file
-            else:
-                rel_path = os.path.join(rel_root, file)
-            rel_path_posix = rel_path.replace("\\", "/")
-
-            if not spec.match_file(rel_path_posix):
-                tracked.append(rel_path)
-    return tracked
-
+# ── Core Operations ────────────────────────────────────────────────────────────
 
 def save_snapshot(branch_name: str) -> int:
     """
-    MOVE all tracked files from the project root into data/snapshots/<branch_name>/.
-    Returns the number of files moved.
+    Stages all workspace changes and commits them as a checkpoint.
+    Returns 1 if a checkpoint was committed, 0 if the workspace was already clean.
     """
-    spec = _load_spec()
-    tracked = _get_tracked_files(spec)
-
-    if not tracked:
+    try:
+        if not _has_changes():
+            return 0
+        _run_git(["add", "-A"])
+        _run_git(["commit", "-m", f"agent: checkpoint for '{branch_name}'"])
+        return 1
+    except Exception as e:
+        print(f"  [Git Error] Failed to save checkpoint: {e}")
         return 0
-
-    branch_snapshot = os.path.join(SNAPSHOT_DIR, branch_name)
-    os.makedirs(branch_snapshot, exist_ok=True)
-
-    # Track which directories we touched during the move
-    affected_dirs: set[str] = set()
-
-    for rel_path in tracked:
-        src = os.path.join(PROJECT_ROOT, rel_path)
-        dst = os.path.join(branch_snapshot, rel_path)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.move(src, dst)
-        # Record all parent directories of this file
-        parts = rel_path.replace("\\", "/").split("/")
-        for i in range(1, len(parts)):
-            affected_dirs.add(os.path.join(PROJECT_ROOT, *parts[:i]))
-
-    # Only remove directories that WE emptied — sorted deepest first
-    for dir_path in sorted(affected_dirs, key=lambda p: p.count(os.sep), reverse=True):
-        if os.path.isdir(dir_path) and not os.listdir(dir_path):
-            os.rmdir(dir_path)
-
-    return len(tracked)
 
 
 def restore_snapshot(branch_name: str) -> int:
     """
-    MOVE all files from data/snapshots/<branch_name>/ back to the project root.
-    Returns the number of files restored. If no snapshot exists, returns 0.
+    Switches the workspace to the target agent branch.
+    Returns 1 on success, 0 on failure.
     """
-    branch_snapshot = os.path.join(SNAPSHOT_DIR, branch_name)
-    if not os.path.exists(branch_snapshot):
+    try:
+        _run_git(["checkout", _git_branch(branch_name)])
+        return 1
+    except Exception as e:
+        print(f"  [Git Error] Failed to switch to '{branch_name}': {e}")
         return 0
-
-    count = 0
-    for root, dirs, files in os.walk(branch_snapshot):
-        for file in files:
-            src = os.path.join(root, file)
-            rel_path = os.path.relpath(src, branch_snapshot)
-            dst = os.path.join(PROJECT_ROOT, rel_path)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.move(src, dst)
-            count += 1
-
-    # Clean up the now-empty snapshot dir
-    shutil.rmtree(branch_snapshot, ignore_errors=True)
-    return count
 
 
 def switch_snapshot(from_branch: str, to_branch: str) -> tuple[int, int]:
     """
-    Save the current branch's files and restore the target branch's files.
-    Returns (files_saved, files_restored).
+    Commits current workspace changes, then checks out the target branch.
+    Returns (saved=0/1, restored=0/1).
     """
     saved = save_snapshot(from_branch)
     restored = restore_snapshot(to_branch)
@@ -135,31 +80,55 @@ def switch_snapshot(from_branch: str, to_branch: str) -> tuple[int, int]:
 
 def copy_snapshot(from_branch: str, to_branch: str):
     """
-    Copies the snapshot of from_branch to to_branch.
-    Used when creating a new child branch — the child inherits the parent's files.
-    Does NOT affect the actual project files.
+    Commits the current branch, then creates a new child branch from it.
+    The new branch inherits all files and history of from_branch.
+    Also switches the workspace to the new branch immediately.
     """
-    src_dir = os.path.join(SNAPSHOT_DIR, from_branch)
-    dst_dir = os.path.join(SNAPSHOT_DIR, to_branch)
-
-    if not os.path.exists(src_dir):
-        return  # Parent has no snapshot yet, child starts empty
-
-    if os.path.exists(dst_dir):
-        shutil.rmtree(dst_dir)
-
-    shutil.copytree(src_dir, dst_dir)
+    try:
+        # Commit any pending changes on the parent branch first
+        save_snapshot(from_branch)
+        # Create and immediately checkout the new branch from the parent
+        _run_git(["checkout", "-b", _git_branch(to_branch), _git_branch(from_branch)])
+    except Exception as e:
+        print(f"  [Git Error] Failed to create branch '{to_branch}' from '{from_branch}': {e}")
 
 
 def snapshot_exists(branch_name: str) -> bool:
-    """Returns True if a snapshot exists for the given branch."""
-    path = os.path.join(SNAPSHOT_DIR, branch_name)
-    return os.path.isdir(path) and bool(os.listdir(path))
+    """Returns True if the git branch agent/<branch_name> exists locally."""
+    try:
+        _run_git(["show-ref", "--verify", f"refs/heads/{_git_branch(branch_name)}"])
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
 
 def delete_snapshot(branch_name: str):
-    """Permanently removes the snapshot directory for a branch."""
-    path = os.path.join(SNAPSHOT_DIR, branch_name)
-    if os.path.exists(path):
-        shutil.rmtree(path)
+    """Permanently deletes the git branch for this timeline."""
+    try:
+        _run_git(["branch", "-D", _git_branch(branch_name)])
+    except Exception as e:
+        print(f"  [Git Error] Failed to delete branch '{branch_name}': {e}")
 
+
+def create_initial_branch(branch_name: str) -> bool:
+    """
+    Creates the initial agent branch from the current HEAD (main).
+    Only used on first-ever startup when agent/default doesn't exist yet.
+    """
+    try:
+        _run_git(["checkout", "-b", _git_branch(branch_name)])
+        # Make an empty initial commit so the branch has a history root
+        _run_git(["commit", "--allow-empty", "-m", f"agent: initial workspace for '{branch_name}'"])
+        return True
+    except Exception as e:
+        print(f"  [Git Error] Failed to create initial branch '{branch_name}': {e}")
+        return False
+
+
+def current_git_branch() -> str:
+    """Returns the current active git branch name (full name, e.g. 'agent/default')."""
+    try:
+        res = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+        return res.stdout.strip()
+    except Exception:
+        return ""

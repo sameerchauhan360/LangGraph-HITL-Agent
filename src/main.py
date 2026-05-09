@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, AIMessageChunk
 from langgraph.types import Command
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from rich.console import Console
+import subprocess
 import tree_manager
 import snapshot_manager
 
@@ -188,13 +189,18 @@ async def main():
         if not session_name:
             session_name = "default"
 
+        # Ensure the branch exists in metadata
         if not tree_manager.branch_exists(session_name):
-            tree_manager.create_branch(session_name, parent=None, summary="Auto-created branch")
+            tree_manager.create_branch(session_name, parent=None, summary="Main timeline")
 
-        # ── Restore snapshot for this branch (if one exists from last session) ──
-        if snapshot_manager.snapshot_exists(session_name):
-            restored = snapshot_manager.restore_snapshot(session_name)
-            print(f"  {GRAY}[Snapshot restored: {restored} file(s) from '{session_name}']{RESET}")
+        # Ensure the git branch exists (may not exist on very first run)
+        if not snapshot_manager.snapshot_exists(session_name):
+            snapshot_manager.create_initial_branch(session_name)
+            print(f"  {GRAY}[Created initial workspace branch 'agent/{session_name}']{RESET}")
+        else:
+            # Switch git to this branch (no-op if already on it)
+            snapshot_manager.restore_snapshot(session_name)
+            print(f"  {GRAY}[Workspace: agent/{session_name}]{RESET}")
 
         config = {"configurable": {"thread_id": session_name}, "recursion_limit": 30}
 
@@ -209,7 +215,7 @@ async def main():
             print(f"\n  {GREEN}✦  New chat:{RESET} {BOLD}'{session_name}'{RESET}")
 
         divider()
-        print(f"  {DIM}Commands: 'history' · 'quit'{RESET}")
+        print(f"  {DIM}Commands: 'history' · 'quit' · '/status' · '/discard' · '/log' · '/merge <branch>'{RESET}")
         divider()
 
         # ── Recover pending interrupt from a crashed session ───────────────────
@@ -237,14 +243,14 @@ async def main():
             except (EOFError, KeyboardInterrupt):
                 saved = snapshot_manager.save_snapshot(session_name)
                 if saved:
-                    print(f"\n  {GRAY}[Snapshot saved: {saved} file(s)]{RESET}")
+                    print(f"\n  {GRAY}[Checkpoint saved on 'agent/{session_name}']{RESET}")
                 print(f"\n  {GRAY}[Stream closed. Exiting.]{RESET}")
                 break
 
             if user_input.lower() in ["quit", "exit", "q"]:
                 saved = snapshot_manager.save_snapshot(session_name)
                 if saved:
-                    print(f"  {GRAY}[Snapshot saved: {saved} file(s)]{RESET}")
+                    print(f"  {GRAY}[Checkpoint saved on 'agent/{session_name}']{RESET}")
                 print(f"\n  {GRAY}Goodbye!{RESET}\n")
                 break
 
@@ -285,7 +291,7 @@ async def main():
                     for b_name, b_meta in branches.items():
                         status = b_meta.get("status", "active")
                         is_active = "★" if b_name == session_name else " "
-                        
+
                         if status == "archived":
                             color = DIM + GRAY
                             status_icon = "🗄"
@@ -297,7 +303,9 @@ async def main():
                             status_icon = "⚪"
 
                         parent = f"(parent: {b_meta['parent']})" if b_meta.get('parent') else "(root)"
-                        print(f"  {color}{is_active} {status_icon} {BOLD}{b_name:<15}{RESET} {GRAY}{parent:<22} {b_meta['summary']}{RESET}")
+                        desc = tree_manager.get_branch_description(b_name)
+                        desc_str = f" {GRAY}{desc}{RESET}" if desc else ""
+                        print(f"  {color}{is_active} {status_icon} {BOLD}{b_name:<15}{RESET} {GRAY}{parent:<22}{RESET}{desc_str}")
                     divider(CYAN)
                     continue
 
@@ -312,14 +320,13 @@ async def main():
                         print(f"\n  {YELLOW}⚠ Branch '{target_branch}' is archived. Use /prune to remove it or create a new branch.{RESET}")
                         continue
 
-                    # Save current branch files, restore target branch files
-                    saved, restored = snapshot_manager.switch_snapshot(session_name, target_branch)
+                    # Commit current, checkout target
+                    snapshot_manager.switch_snapshot(session_name, target_branch)
                     session_name = target_branch
                     config["configurable"]["thread_id"] = session_name
                     state = await graph.aget_state(config)
                     msgs_count = len(state.values.get("messages", [])) if state else 0
-                    snap_info = f" | {saved} file(s) saved, {restored} restored" if saved or restored else ""
-                    print(f"\n  {GREEN}✔ Switched to branch '{session_name}' ({msgs_count} messages{snap_info}).{RESET}")
+                    print(f"\n  {GREEN}✔ Switched to 'agent/{session_name}' ({msgs_count} messages).{RESET}")
                     continue
 
                 elif cmd == "/branch" and len(parts) >= 3:
@@ -333,23 +340,19 @@ async def main():
                     # 1. Grab current LangGraph state
                     current_state = await graph.aget_state(config)
 
-                    # 2. Save A's files → snapshots/A/
-                    snapshot_manager.save_snapshot(session_name)
-                    # 3. Copy A's snapshot → snapshots/B/ (B inherits A's files)
+                    # 2. Commit current + create new git branch (inherits all files)
                     snapshot_manager.copy_snapshot(session_name, new_branch)
-                    # 4. Restore B's snapshot → workspace (B is now active)
-                    restored = snapshot_manager.restore_snapshot(new_branch)
 
-                    # 5. Register the branch and switch
+                    # 3. Register the branch (summary stored in git config)
                     tree_manager.create_branch(new_branch, parent=session_name, summary=summary)
                     session_name = new_branch
                     config["configurable"]["thread_id"] = session_name
 
-                    # 6. Inject LangGraph state into new branch
+                    # 4. Inject LangGraph conversation state into new branch
                     if current_state and current_state.values:
                         await graph.aupdate_state(config, current_state.values)
 
-                    print(f"\n  {GREEN}✔ Created and switched to branch '{session_name}' ({restored} file(s) inherited).{RESET}")
+                    print(f"\n  {GREEN}✔ Created 'agent/{session_name}' — workspace and memory inherited.{RESET}")
                     continue
                 elif cmd == "/archive" and len(parts) >= 2:
                     target = parts[1]
@@ -393,9 +396,89 @@ async def main():
                     print(f"\n  {GREEN}✔ Branch '{target}' has been restored to active.{RESET}")
                     continue
 
+                elif cmd == "/status":
+                    print(f"\n  {CYAN}{BOLD}🔍 Workspace Status — agent/{session_name}{RESET}")
+                    divider(CYAN)
+                    res = subprocess.run(
+                        ["git", "status", "--short"],
+                        cwd=os.getcwd(), capture_output=True, text=True
+                    )
+                    output = res.stdout.strip()
+                    if output:
+                        for line in output.splitlines():
+                            marker = line[:2]
+                            filename = line[2:]
+                            if "M" in marker:
+                                print(f"    {YELLOW}● Modified: {RESET}{filename}")
+                            elif "A" in marker or "??" in marker:
+                                print(f"    {GREEN}✚ Created:  {RESET}{filename}")
+                            elif "D" in marker:
+                                print(f"    {RED}🗑 Deleted:  {RESET}{filename}")
+                            else:
+                                print(f"    {GRAY}  {line}{RESET}")
+                    else:
+                        print(f"    {GREEN}✔ Workspace clean — nothing to commit.{RESET}")
+                    divider(CYAN)
+                    continue
+
+                elif cmd in ["/discard", "/reset"]:
+                    confirm = input(f"\n  {RED}{BOLD}⚠ Discard all changes since last checkpoint? (y/n): {RESET}").strip().lower()
+                    if confirm == "y":
+                        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=os.getcwd(), capture_output=True)
+                        subprocess.run(["git", "clean", "-fd"], cwd=os.getcwd(), capture_output=True)
+                        # Inject failure warning into agent memory so it doesn't repeat the mistake
+                        warning = HumanMessage(
+                            content=(
+                                "[SYSTEM] The user has discarded all your recent file changes — "
+                                "they were broken or did not meet expectations. The workspace has been "
+                                "reverted to the last checkpoint. Do NOT repeat the same approach. "
+                                "Try a completely different strategy or library."
+                            )
+                        )
+                        await graph.aupdate_state(config, {"messages": [warning]})
+                        print(f"\n  {GREEN}✔ Workspace reverted. Agent memory has been notified.{RESET}")
+                    else:
+                        print(f"  {GRAY}Discard cancelled.{RESET}")
+                    continue
+
+                elif cmd == "/log":
+                    print(f"\n  {CYAN}{BOLD}📜 Checkpoint History — agent/{session_name}{RESET}")
+                    divider(CYAN)
+                    res = subprocess.run(
+                        ["git", "log", f"agent/{session_name}", "--oneline", "-n", "10"],
+                        cwd=os.getcwd(), capture_output=True, text=True
+                    )
+                    log = res.stdout.strip()
+                    if log:
+                        for line in log.splitlines():
+                            sha, _, msg = line.partition(" ")
+                            print(f"    {BLUE}{sha}{RESET}  {GRAY}{msg}{RESET}")
+                    else:
+                        print(f"    {GRAY}No checkpoints yet on this branch.{RESET}")
+                    divider(CYAN)
+                    continue
+
+                elif cmd == "/merge" and len(parts) >= 2:
+                    source = parts[1]
+                    if not tree_manager.branch_exists(source):
+                        print(f"\n  {RED}⚠ Branch '{source}' does not exist.{RESET}")
+                        continue
+                    print(f"\n  {CYAN}🔀 Merging 'agent/{source}' → 'agent/{session_name}'...{RESET}")
+                    res = subprocess.run(
+                        ["git", "merge", f"agent/{source}"],
+                        cwd=os.getcwd(), capture_output=True, text=True
+                    )
+                    if res.returncode == 0:
+                        print(f"  {GREEN}✔ Merge successful!{RESET}")
+                    else:
+                        print(f"\n  {RED}⚠ Merge conflict detected.{RESET}")
+                        print(f"  {GRAY}{res.stdout or res.stderr}{RESET}")
+                        print(f"  {YELLOW}Resolve conflicts in your editor, then run: git add . && git commit{RESET}")
+                    continue
+
                 else:
                     print(f"\n  {RED}⚠ Unknown command or missing arguments.{RESET}")
-                    print(f"  {GRAY}Usage: /branches | /branch <name> <desc> | /checkout <name> | /archive <name> | /restore <name> | /prune <name>{RESET}")
+                    print(f"  {GRAY}Usage: /branches | /branch <name> <desc> | /checkout <name> | /archive <name> | /restore <name> | /prune <name> | /status | /discard | /log | /merge <name>{RESET}")
                     continue
 
             await run_turn(
