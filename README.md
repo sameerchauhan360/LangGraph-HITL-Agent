@@ -4,6 +4,10 @@ A persistent, terminal-based AI assistant built on LangGraph with **git-backed b
 
 ---
 
+![Architecture & Flow](workflow_2.png)
+
+---
+
 ## Features
 
 ### 🤖 Core Agent
